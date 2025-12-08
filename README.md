@@ -12,6 +12,8 @@
 - **ffmpeg**: Required for audio conversion and embedding thumbnails/metadata. `yt-dlp` must be able to find `ffmpeg`.
 - **Homebrew (recommended)**: Simplifies installing `yt-dlp`, `deno` and `ffmpeg`.
 
+- yt-dlp, Deno and ffmpeg can be installed through brew in the settings menu of the app.
+
 **Quick Install (user)**
 - Install Homebrew (if you don't have it):
 
@@ -27,7 +29,8 @@ brew install yt-dlp deno ffmpeg
 
 - Run the app:
   - Open `audioscrap.xcodeproj` or `audioscrap.xcworkspace` in Xcode and run the scheme `audioscrap`.
-  - Alternatively, build and run as you would any macOS app from Xcode.
+  - Build and run as you would any macOS app from Xcode.
+  - Or just download the .zip file in the Releases page. 
 
 **Developer / Build Instructions**
 - Open the workspace in Xcode:

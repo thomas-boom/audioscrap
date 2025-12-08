@@ -1,226 +1,723 @@
+//
+//  ContentView.swift
+//  audioscrap
+//
+//  Created by Thomas Boom on 12/7/25.
+//
+
 import SwiftUI
-import AppKit
 import UniformTypeIdentifiers
+import AppKit
 
 struct ContentView: View {
-    @StateObject private var vm = YTDLPViewModel()
-    @State private var customName: String = ""
-    @State private var showLogSheet: Bool = false
+    @StateObject private var downloadManager = DownloadManager()
+    @State private var urlInput: String = ""
+    // platform picker removed; we always autodetect
+    @State private var showingSettings = false
+    @State private var showingFolderPicker = false
+    @State private var showingAbout = false
 
     var body: some View {
-        Group {
-            ZStack {
-                // Liquid glass background for the whole app content
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 2)
+        VStack(spacing: 0) {
+            // Main content area (all UI elements live here)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    headerView
+                    inputSection
 
-                VStack(spacing: 14) {
-                    Text("YTScrap")
-                        .font(.system(.title2, design: .monospaced))
-                        .padding(.top, 12)
+                    Divider()
 
-                    // Simple UI: user can locate a local yt-dlp binary and view logs
-                    Spacer()
+                    if downloadManager.downloads.isEmpty {
+                        emptyStateView
+                    } else {
+                        downloadsListView
+                    }
                 }
+                .padding()
+                .font(.system(.body, design: .monospaced))
+            }
+
+            // Bottom status bar remains visible
+            Divider()
+            statusBar
+        }
+        .frame(minWidth: 700, minHeight: 420)
+        .onAppear {
+            // Ensure the app is activated and window is brought to front
+            DispatchQueue.main.async {
+                NSApplication.shared.activate(ignoringOtherApps: true)
             }
         }
-        // Apply a global monospaced font design to this view hierarchy
-        .font(.system(.body, design: .monospaced))
-        .padding(14)
-        .frame(minWidth: 520, minHeight: 320)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .padding(8)
-                    
-                    // Center loading bar overlay (appears in middle while downloading)
-                    // No center loading bar — download flow removed
-                    .overlay {
-                        EmptyView()
-                    }
-                    // Separate status bar anchored to bottom of the app (always visible)
-                    .overlay(alignment: .bottom) {
-                        StatusBarView(vm: vm, showLog: { showLogSheet = true })
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 22)
-                            .padding(.bottom, 10)
-                    }
-                    .animation(.easeInOut(duration: 0.22), value: vm.status)
-        // Present the in-app log viewer as a sheet from ContentView scope
-        .sheet(isPresented: $showLogSheet) {
-            LogViewer(vm: vm, isPresented: $showLogSheet)
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(downloadManager: downloadManager)
+        }
+        .sheet(isPresented: $showingAbout) {
+            aboutSheet
+        }
+        .fileImporter(
+            isPresented: $showingFolderPicker,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first {
+                    downloadManager.saveLocation = url.path
+                }
+            case .failure(let error):
+                print("Error selecting folder: \(error.localizedDescription)")
+            }
         }
     }
 
-    // locate/copy/sign workflows are handled via StatusBar and locate button
+    // MARK: - Status Bar
+    private var statusBar: some View {
+        // Compute runtime availability before building the view to avoid ViewBuilder type inference issues
+        // yt-dlp checks
+        let ytFound = !downloadManager.ytDlpPath.isEmpty || downloadManager.ytDlpCandidatePath != nil || downloadManager.ytDlpResolvedCandidatePath != nil
+        let ytExecutable = (!downloadManager.ytDlpPath.isEmpty && FileManager.default.isExecutableFile(atPath: downloadManager.ytDlpPath)) || (downloadManager.ytDlpResolvedCandidatePath != nil && FileManager.default.isExecutableFile(atPath: downloadManager.ytDlpResolvedCandidatePath!))
+        let ytReady = downloadManager.isYtDlpInstalled
 
-    // MARK: - Auxiliary Views
+        // deno checks
+        let denoFound = !downloadManager.denoPath.isEmpty || downloadManager.denoCandidatePath != nil || downloadManager.denoResolvedCandidatePath != nil
+        let denoExecutable = (!downloadManager.denoPath.isEmpty && FileManager.default.isExecutableFile(atPath: downloadManager.denoPath)) || (downloadManager.denoResolvedCandidatePath != nil && FileManager.default.isExecutableFile(atPath: downloadManager.denoResolvedCandidatePath!))
+        let denoReady = downloadManager.isDenoInstalled
 
-}
+        // ffmpeg checks
+        let ffFound = !downloadManager.ffmpegPath.isEmpty || downloadManager.ffmpegCandidatePath != nil || downloadManager.ffmpegResolvedCandidatePath != nil
+        let ffExecutable = (!downloadManager.ffmpegPath.isEmpty && FileManager.default.isExecutableFile(atPath: downloadManager.ffmpegPath)) || (downloadManager.ffmpegResolvedCandidatePath != nil && FileManager.default.isExecutableFile(atPath: downloadManager.ffmpegResolvedCandidatePath!))
+        let ffReady = downloadManager.isFfmpegInstalled
 
-// Removed center loading bar — download UI removed from the app.
-
-// MARK: - Bottom Status Bar
-
-struct StatusBarView: View {
-    @ObservedObject var vm: YTDLPViewModel
-    let showLog: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            // Left icon and compact percent
-            Image(systemName: "info.circle")
-                .foregroundStyle(Color.accentColor)
-                .font(.system(.title3, design: .monospaced))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(vm.status)
-                    .font(.system(.footnote, design: .monospaced)).bold()
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(vm.statusSummary)
+        // Helper to render three-state checks for a runtime
+        func runtimeChecks(name: String, found: Bool, executable: Bool, ready: Bool) -> some View {
+            HStack(spacing: 6) {
+                Text(name)
                     .font(.system(.caption2, design: .monospaced))
-                    .foregroundColor(.secondary)
+                    .frame(minWidth: 54, alignment: .leading)
+
+                Image(systemName: executable ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(executable ? .green : .gray)
+                    .help("Executable")
+
+                Image(systemName: found ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(found ? .green : .gray)
+                    .help("Found")
+
+                Image(systemName: ready ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(ready ? .green : .gray)
+                    .help("Ready")
+            }
+        }
+
+        return HStack(spacing: 24) {
+            // Single combined check per runtime: present && executable && reported ready
+            let ytOk = ytFound && ytExecutable && ytReady
+            HStack(spacing: 8) {
+                Text("yt-dlp")
+                    .font(.system(.caption2, design: .monospaced))
+                Image(systemName: ytOk ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(ytOk ? .green : .gray)
+            }
+
+            let denoOk = denoFound && denoExecutable && denoReady
+            HStack(spacing: 8) {
+                Text("deno")
+                    .font(.system(.caption2, design: .monospaced))
+                Image(systemName: denoOk ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(denoOk ? .green : .gray)
+            }
+
+            let ffOk = ffFound && ffExecutable && ffReady
+            HStack(spacing: 8) {
+                Text("ffmpeg")
+                    .font(.system(.caption2, design: .monospaced))
+                Image(systemName: ffOk ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(ffOk ? .green : .gray)
             }
 
             Spacer()
 
-            // Right corner: show yt-dlp availability and version
-            VStack(alignment: .trailing, spacing: 2) {
-                HStack(spacing: 6) {
-                    Image(systemName: vm.ytdlpAvailable ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(vm.ytdlpAvailable ? Color.green : Color.orange)
-                        .font(.system(.body, design: .monospaced))
-                    Text(vm.ytdlpAvailable ? "yt-dlp" : "yt-dlp")
-                        .font(.system(.caption2, design: .monospaced)).bold()
-                }
-                Text(vm.ytdlpAvailable ? (vm.ytdlpVersion ?? "v?") : "Not installed")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundColor(vm.ytdlpAvailable ? .secondary : .red)
+            // Settings button kept small
+            Button(action: { showingSettings = true }) {
+                Image(systemName: "gearshape")
             }
-
-            // Small utilities: show the install log and allow retrying install
-            HStack(spacing: 8) {
-                Button(action: { showLog() }) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                    Text("Show Log")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button(action: { vm.openReleasePage() }) {
-                    Image(systemName: "link")
-                    Text("Open Release")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button(action: { Task { await vm.locateLocalBinary() } }) {
-                    Image(systemName: "magnifyingglass")
-                    Text("Locate Binary")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button(action: { vm.retryInstall() }) {
-                    Image(systemName: "arrow.clockwise")
-                    Text("Retry")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
-
-            // Move sheet to ContentView scope; StatusBarView will call showLog closure
-
-            // No cancel button — no download flow in-app
+            .buttonStyle(.plain)
+            .help("Settings")
         }
-        .padding(10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.primary.opacity(0.06)))
+        .padding(.vertical, 6)
+        .padding(.horizontal)
+        // Use Apple's liquid glass (ultraThinMaterial) for a native translucent status bar
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.12)))
+        .padding([.horizontal, .bottom])
     }
-}
+    
+    // MARK: - Header View
+    private var headerView: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                    Image(systemName: "music.note.list")
+                        .font(.system(size: 32))
+                        .foregroundColor(.accentColor)
 
-// MARK: - Log Viewer Sheet
-
-struct LogViewer: View {
-    @ObservedObject var vm: YTDLPViewModel
-    @Binding var isPresented: Bool
-
-    @State private var logText: String = ""
-
-    var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("yt-dlp Install Log")
-                    .font(.system(.headline, design: .monospaced))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("audioscrap")
+                            .font(.system(.title3, design: .monospaced))
+                            .fontWeight(.bold)
+                    }
                 Spacer()
-                Button("Close") { isPresented = false }
-                    .keyboardShortcut(.cancelAction)
+
+                // About / Info button on the right side of the title
+                Button(action: { showingAbout = true }) {
+                    Image(systemName: "info.circle")
+                }
+                .buttonStyle(.plain)
+                .help("About this app")
+            }
+            .padding()
+            .background(Color(NSColor.controlBackgroundColor))
+        }
+    }
+
+    // About sheet content (moved from Settings -> About)
+    private var aboutSheet: some View {
+        VStack(spacing: 16) {
+            HStack {
+                VStack(alignment: .leading) {
+                    let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "audioscrap"
+                    let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+                    let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+                    Text(appName)
+                        .font(.system(.title, design: .monospaced))
+                        .fontWeight(.bold)
+                    Text("Version \(shortVersion) (\(build))")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
             }
 
             Divider()
 
             ScrollView {
-                Text(logText)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("AudioScrap uses yt-dlp to download the highest quality audio available from YouTube and SoundCloud, converting it to MP3 format with metadata and album art.")
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundColor(.secondary)
+
+                    // Additional app details (smaller text)
+                    Group {
+                        HStack {
+                            Text("Author:")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("Thomas Boom")
+                                .font(.system(.caption2, design: .monospaced))
+                        }
+
+                        HStack {
+                            Text("Repository:")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("View on GitHub") {
+                                if let url = URL(string: "https://github.com/thomas-boom/audioscrap") {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
+                            .buttonStyle(.link)
+                        }
+
+                        HStack {
+                            Text("Support:")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("Report an issue") {
+                                if let url = URL(string: "https://github.com/thomas-boom/audioscrap/issues") {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
+                            .buttonStyle(.link)
+                        }
+                    }
+                    .padding(.top, 6)
+
+                }
+                .padding(.bottom)
             }
-            .background(Color(.textBackgroundColor).opacity(0.02))
-            .cornerRadius(8)
 
-            HStack(spacing: 10) {
-                Button(action: { refresh() }) {
-                    Image(systemName: "arrow.clockwise")
-                    Text("Refresh")
-                }
-                .buttonStyle(.bordered)
-
-                Button(action: { copyToPasteboard() }) {
-                    Image(systemName: "doc.on.doc")
-                    Text("Copy")
-                }
-                .buttonStyle(.bordered)
-
-                Button(role: .destructive, action: { clear() }) {
-                    Image(systemName: "trash")
-                    Text("Clear")
-                }
-                .buttonStyle(.bordered)
-
+            HStack {
                 Spacer()
-
-                Button(action: { vm.openInstallLog() }) {
-                    Image(systemName: "folder")
-                    Text("Open In Finder")
-                }
-                .buttonStyle(.bordered)
+                Button("Done") { showingAbout = false }
+                    .buttonStyle(.borderedProminent)
             }
         }
-        .padding(16)
-        .frame(minWidth: 520, minHeight: 320)
-        .onAppear { refresh() }
+        .padding()
+        .frame(minWidth: 420, minHeight: 260)
     }
-
-    private func refresh() {
-        logText = vm.readInstallLog() ?? "No install log found."
+    
+    // MARK: - Input Section
+    private var inputSection: some View {
+        VStack(spacing: 12) {
+            // Save Location
+            HStack {
+                Image(systemName: "folder.fill")
+                    .foregroundColor(.accentColor)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Save to:")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    Text(downloadManager.saveLocation)
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(1)
+                        .foregroundColor(.primary)
+                }
+                
+                Spacer()
+                
+                Button("Change...") {
+                    showingFolderPicker = true
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(.horizontal)
+            
+            // Platform selection removed — autodetect only
+            
+            // URL Input
+            HStack(spacing: 12) {
+                Image(systemName: "link.circle.fill")
+                    .font(.system(.title2, design: .monospaced))
+                    .foregroundColor(.accentColor)
+                
+                TextField("Paste YouTube or SoundCloud URL here...", text: $urlInput)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        addDownload()
+                    }
+                Button(action: { urlInput = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .help("Clear URL")
+                .disabled(urlInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                
+                Button(action: addDownload) {
+                    Label("Download", systemImage: "arrow.down.circle.fill")
+                        .font(.system(.headline, design: .monospaced))
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(urlInput.trimmingCharacters(in: .whitespaces).isEmpty || !downloadManager.isYtDlpInstalled)
+            }
+                .padding(.horizontal)
+            .padding(.bottom, 12)
+        }
+        .padding(.top, 12)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
     }
+    
+    // MARK: - Empty State
+    private var emptyStateView: some View {
+        VStack(spacing: 20) {
+            Spacer()
 
-    private func copyToPasteboard() {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(logText, forType: .string)
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 64))
+                .foregroundColor(.secondary)
+
+            Text("No downloads yet")
+                .font(.system(.title2, design: .monospaced))
+                .fontWeight(.semibold)
+
+            Text("Paste a YouTube or SoundCloud URL above and click Download to start")
+                .font(.system(.body, design: .monospaced))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+
+            // yt-dlp installation information moved to the bottom status bar
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, minHeight: 300, alignment: .center)
     }
-
-    private func clear() {
-        vm.clearInstallLog()
-        refresh()
+    
+    // MARK: - Downloads List
+    private var downloadsListView: some View {
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                ForEach(downloadManager.downloads) { item in
+                    DownloadRowView(item: item, onRemove: {
+                        withAnimation(.easeInOut) {
+                            downloadManager.removeDownload(item: item)
+                        }
+                    })
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                }
+                .animation(.spring(response: 0.36, dampingFraction: 0.8), value: downloadManager.downloads.count)
+            }
+                        Divider()
+            .padding()
+        }
+    }
+    
+    // MARK: - Actions
+    private func addDownload() {
+        let trimmedURL = urlInput.trimmingCharacters(in: .whitespaces)
+        guard !trimmedURL.isEmpty else { return }
+        
+        downloadManager.addDownload(url: trimmedURL)
+        urlInput = ""
     }
 }
 
-// MARK: - Previews
-
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
+// MARK: - Download Row View
+struct DownloadRowView: View {
+    @ObservedObject var item: DownloadItem
+    let onRemove: () -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                // Status Icon
+                statusIcon
+                
+                // Title and URL
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.title)
+                        .font(.system(.headline, design: .monospaced))
+                        .lineLimit(1)
+                    
+                    Text(item.url)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                // Action buttons
+                actionButtons
+            }
+            
+            // Progress Bar
+            if item.status == .downloading || item.status == .processing {
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: item.progress, total: 1.0)
+                        .progressViewStyle(.linear)
+                        .animation(.linear(duration: 0.12), value: item.progress)
+                    
+                    HStack {
+                        Text(item.status.rawValue)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundColor(.secondary)
+                        
+                        Spacer()
+                        
+                        Text("\(Int(item.progress * 100))%")
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            
+            // Error message
+            if let error = item.error, item.status == .failed {
+                Text(error)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.red)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            
+            // Success message
+            if item.status == .completed, let outputPath = item.outputPath {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                    
+                    Text("Saved to Downloads")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    
+                    Button("Show in Finder") {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: outputPath)
+                    }
+                    .buttonStyle(.link)
+                    .font(.system(.caption, design: .monospaced))
+                }
+            }
+        }
+        .font(.system(.body, design: .monospaced))
+        .padding()
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(borderColor, lineWidth: 1)
+        )
     }
+    
+    private var statusIcon: some View {
+        Group {
+            switch item.status {
+            case .pending:
+                Image(systemName: "clock")
+                    .foregroundColor(.orange)
+            case .downloading:
+                ProgressView()
+                    .scaleEffect(0.7)
+            case .processing:
+                ProgressView()
+                    .scaleEffect(0.7)
+            case .completed:
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+            case .failed:
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.red)
+            }
+        }
+        .font(.system(.title3, design: .monospaced))
+        .frame(width: 30)
+        .scaleEffect(item.status == .downloading ? 1.07 : 1.0)
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: item.status)
+    }
+    
+    private var borderColor: Color {
+        switch item.status {
+        case .completed:
+            return .green.opacity(0.3)
+        case .failed:
+            return .red.opacity(0.3)
+        case .downloading, .processing:
+            return .blue.opacity(0.3)
+        default:
+            return .gray.opacity(0.2)
+        }
+    }
+    
+    private var actionButtons: some View {
+        HStack(spacing: 8) {
+            Button(action: onRemove) {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.plain)
+            .help("Remove")
+        }
+    }
+}
+
+// MARK: - Settings View
+struct SettingsView: View {
+    @ObservedObject var downloadManager: DownloadManager
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Settings")
+                .font(.system(.title, design: .monospaced))
+                .fontWeight(.bold)
+            
+            // Make the default font inside settings monospaced
+            
+            
+            Form {
+                Section("Download Settings") {
+                    HStack {
+                        Text("Audio Quality:")
+                        Spacer()
+                        Picker("Quality", selection: $downloadManager.audioQuality) {
+                            ForEach(downloadManager.availableAudioQualityOptions.indices, id: \.self) { idx in
+                                let opt = downloadManager.availableAudioQualityOptions[idx]
+                                Text(opt.label).tag(opt.value)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 160)
+                        .help("0 = best (variable), or use e.g. 320k for a target bitrate")
+                    }
+                    
+                    HStack {
+                        Text("Format:")
+                        Spacer()
+                        // Static label since only MP3 is supported
+                        Text("MP3")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(width: 140, alignment: .trailing)
+                            .help("Format is fixed to MP3 (bitrate options only apply to MP3)")
+                    }
+                }
+                
+                Section("Deno Runtime") {
+                    HStack {
+                        Text("Status:")
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(downloadManager.isDenoInstalled ? Color.green : Color.red)
+                                .frame(width: 8, height: 8)
+                            Text(downloadManager.isDenoInstalled ? "Installed" : "Not Found")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    if downloadManager.isDenoInstalled {
+                        HStack {
+                            Text("Path:")
+                            Spacer()
+                            Text(downloadManager.denoPath)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    // Actions mirroring yt-dlp remediation
+                    HStack(spacing: 8) {
+                        Button("Recheck") { downloadManager.checkDenoInstallation() }
+                            .buttonStyle(.bordered)
+                        
+                        Button("Show") { downloadManager.openDenoInFinder() }
+                            .buttonStyle(.bordered)
+                        
+                        Button("Make Executable") { downloadManager.makeDenoExecutable() }
+                            .buttonStyle(.borderedProminent)
+                        
+                        Button("Run in Terminal") { downloadManager.openTerminalAndRunDenoChmod() }
+                            .buttonStyle(.bordered)
+                    }
+                    
+                    HStack(spacing: 8) {
+                        Button("Copy chmod") { downloadManager.copyDenoChmodCommandToClipboard() }
+                            .buttonStyle(.bordered)
+                        
+                        Button("Install via Brew") { downloadManager.installDenoViaBrew() }
+                            .buttonStyle(.borderedProminent)
+                        
+                        Button("Copy brew cmd") { downloadManager.copyDenoBrewCommandToClipboard() }
+                            .buttonStyle(.bordered)
+                    }
+                }
+
+                Section("yt-dlp Runtime") {
+                    HStack {
+                        Text("Status:")
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(downloadManager.isYtDlpInstalled ? Color.green : Color.red)
+                                .frame(width: 8, height: 8)
+                            Text(downloadManager.isYtDlpInstalled ? "Installed" : "Not Found")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    if downloadManager.isYtDlpInstalled {
+                        HStack {
+                            Text("Path:")
+                            Spacer()
+                            Text(downloadManager.ytDlpPath)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    HStack(spacing: 8) {
+                        Button("Recheck") { downloadManager.checkYtDlpInstallation() }
+                            .buttonStyle(.bordered)
+                        
+                        Button("Show") { downloadManager.openYtDlpInFinder() }
+                            .buttonStyle(.bordered)
+                        
+                        Button("Make Executable") { downloadManager.makeYtDlpExecutable() }
+                            .buttonStyle(.borderedProminent)
+                        
+                        Button("Run in Terminal") { downloadManager.openTerminalAndRunChmod() }
+                            .buttonStyle(.bordered)
+                    }
+                    
+                    HStack(spacing: 8) {
+                        Button("Copy chmod") { downloadManager.copyChmodCommandToClipboard() }
+                            .buttonStyle(.bordered)
+                        
+                        Button("Install via Brew") { downloadManager.installYtDlpViaBrew() }
+                            .buttonStyle(.borderedProminent)
+                        
+                        Button("Copy brew cmd") { downloadManager.copyBrewCommandToClipboard() }
+                            .buttonStyle(.bordered)
+                    }
+                    
+                    // Test notification removed per UI request
+                }
+
+                Section("ffmpeg Runtime") {
+                    HStack {
+                        Text("Status:")
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(downloadManager.isFfmpegInstalled ? Color.green : Color.red)
+                                .frame(width: 8, height: 8)
+                            Text(downloadManager.isFfmpegInstalled ? "Installed" : "Not Found")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    if downloadManager.isFfmpegInstalled {
+                        HStack {
+                            Text("Path:")
+                            Spacer()
+                            Text(downloadManager.ffmpegPath)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        Button("Recheck") { downloadManager.checkFfmpegInstallation() }
+                            .buttonStyle(.bordered)
+
+                        Button("Show") { downloadManager.openFfmpegInFinder() }
+                            .buttonStyle(.bordered)
+
+                        Button("Make Executable") { downloadManager.makeFfmpegExecutable() }
+                            .buttonStyle(.borderedProminent)
+
+                        Button("Run in Terminal") { downloadManager.openTerminalAndRunFfmpegChmod() }
+                            .buttonStyle(.bordered)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button("Copy chmod") { downloadManager.copyFfmpegChmodCommandToClipboard() }
+                            .buttonStyle(.bordered)
+
+                        Button("Install via Brew") { downloadManager.installFfmpegViaBrew() }
+                            .buttonStyle(.borderedProminent)
+
+                        Button("Copy brew cmd") { downloadManager.copyFfmpegBrewCommandToClipboard() }
+                            .buttonStyle(.bordered)
+                    }
+                }
+                
+                // About moved to header info button
+            }
+            .formStyle(.grouped)
+            
+            Button("Done") {
+                dismiss()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding()
+        .frame(width: 500, height: 400)
+    }
+}
+
+#Preview {
+    ContentView()
 }

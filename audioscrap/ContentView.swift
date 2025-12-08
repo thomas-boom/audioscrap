@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var showingFolderPicker = false
     @State private var showingAbout = false
+    @State private var showingInvalidAlert = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -68,6 +69,17 @@ struct ContentView: View {
                 print("Error selecting folder: \(error.localizedDescription)")
             }
         }
+        .alert(isPresented: $showingInvalidAlert) {
+            Alert(title: Text("Unsupported URL"), message: Text("Please paste a YouTube or SoundCloud URL only."), dismissButton: .default(Text("OK")))
+        }
+    }
+
+    private func isSupportedURL(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), let host = url.host?.lowercased() else { return false }
+        if host.contains("youtube.com") || host == "youtu.be" { return true }
+        if host.contains("soundcloud.com") { return true }
+        return false
     }
 
     // MARK: - Status Bar
@@ -201,7 +213,7 @@ struct ContentView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("AudioScrap uses yt-dlp to download the highest quality audio available from YouTube and SoundCloud, converting it to MP3 format with metadata and album art.")
+                    Text("AudioScrap is front-end that uses yt-dlp to download the highest quality audio available from YouTube and SoundCloud, converting it to MP3 format with metadata and album art.")
                         .font(.system(.footnote, design: .monospaced))
                         .foregroundColor(.secondary)
 
@@ -305,12 +317,19 @@ struct ContentView: View {
                 .help("Clear URL")
                 .disabled(urlInput.trimmingCharacters(in: .whitespaces).isEmpty)
                 
-                Button(action: addDownload) {
+                Button(action: {
+                    let trimmed = urlInput.trimmingCharacters(in: .whitespaces)
+                    guard isSupportedURL(trimmed) else {
+                        showingInvalidAlert = true
+                        return
+                    }
+                    addDownload()
+                }) {
                     Label("Download", systemImage: "arrow.down.circle.fill")
                         .font(.system(.headline, design: .monospaced))
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(urlInput.trimmingCharacters(in: .whitespaces).isEmpty || !downloadManager.isYtDlpInstalled)
+                .disabled(!isSupportedURL(urlInput) || !downloadManager.isYtDlpInstalled)
             }
                 .padding(.horizontal)
             .padding(.bottom, 12)

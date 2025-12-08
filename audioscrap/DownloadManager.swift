@@ -1251,6 +1251,8 @@ extension DownloadManager: UNUserNotificationCenterDelegate {
                         item.progress = 1.0
                     }
                     item.outputPath = outputPath
+                    // Play a short completion sound
+                    NSSound.beep()
                 }
             } else {
                 let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()

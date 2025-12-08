@@ -1,5 +1,8 @@
 **AudioScrap**
 
+<img width="1012" height="762" alt="Scherm­afbeelding 2025-12-08 om 1 42 19 PM" src="https://github.com/user-attachments/assets/a310cf35-008c-40c0-a7eb-7d91d0bf952a" />
+
+
 - **Purpose**: A small macOS SwiftUI app that uses `yt-dlp` to download audio from YouTube and SoundCloud, convert to MP3 (with metadata and embedded thumbnail), and save to a user-selected folder.
 
 **Requirements**

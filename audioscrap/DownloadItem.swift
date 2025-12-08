@@ -39,6 +39,8 @@ class DownloadItem: Identifiable, ObservableObject {
     @Published var platform: Platform
     @Published var error: String?
     @Published var outputPath: String?
+    @Published var outputFile: String?
+    @Published var metadata: [String: String] = [:]
     
     init(url: String, platform: Platform = .auto) {
         self.url = url

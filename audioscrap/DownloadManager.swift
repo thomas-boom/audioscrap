@@ -10,6 +10,7 @@ import SwiftUI
 import Combine
 import UserNotifications
 import AppKit
+import AVFoundation
 
 class DownloadManager: NSObject, ObservableObject {
     @Published var downloads: [DownloadItem] = []
@@ -23,6 +24,144 @@ class DownloadManager: NSObject, ObservableObject {
             UserDefaults.standard.set(self.saveLocation, forKey: "saveLocation")
         }
     }
+
+    private func extractMetadataForItem(_ item: DownloadItem) {
+        // Determine actual file path
+        var filePath: String? = nil
+        if let of = item.outputFile, !of.isEmpty {
+            filePath = of
+        } else {
+            // Try to find a candidate file in the save location
+            let fm = FileManager.default
+            let dir = self.saveLocation
+            do {
+                let contents = try fm.contentsOfDirectory(atPath: dir)
+                let candidates = contents.filter { name in
+                    let lower = name.lowercased()
+                    return lower.hasSuffix(".\(self.audioFormat)") || lower.hasSuffix(".mp3") || lower.hasSuffix(".flac")
+                }
+                if !candidates.isEmpty {
+                    if !item.title.isEmpty && item.title != "Fetching info..." {
+                        if let match = candidates.first(where: { $0.contains(item.title) }) {
+                            filePath = (dir as NSString).appendingPathComponent(match)
+                        }
+                    }
+                    if filePath == nil {
+                        var newest: (name: String, date: Date)? = nil
+                        for name in candidates {
+                            let full = (dir as NSString).appendingPathComponent(name)
+                            if let attr = try? fm.attributesOfItem(atPath: full), let mod = attr[.modificationDate] as? Date {
+                                if newest == nil || mod > newest!.date {
+                                    newest = (name, mod)
+                                }
+                            }
+                        }
+                        if let n = newest {
+                            filePath = (dir as NSString).appendingPathComponent(n.name)
+                        }
+                    }
+                }
+            } catch {
+                // ignore
+            }
+        }
+
+        guard let finalPath = filePath else { return }
+
+        var meta: [String: String] = [:]
+
+        // Try ffprobe if available
+        var ffprobePath: String? = nil
+        if !self.ffmpegPath.isEmpty {
+            let ffDir = (self.ffmpegPath as NSString).deletingLastPathComponent
+            let candidate = (ffDir as NSString).appendingPathComponent("ffprobe")
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                ffprobePath = candidate
+            }
+        }
+        if ffprobePath == nil {
+            // Try common Homebrew location
+            let hb = "/usr/local/bin/ffprobe"
+            if FileManager.default.isExecutableFile(atPath: hb) {
+                ffprobePath = hb
+            }
+        }
+
+        if let probe = ffprobePath {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: probe)
+            p.arguments = ["-v", "quiet", "-print_format", "json", "-show_format", finalPath]
+            var env = ProcessInfo.processInfo.environment
+            var pathComponents: [String] = []
+            if !self.ffmpegPath.isEmpty {
+                pathComponents.append((self.ffmpegPath as NSString).deletingLastPathComponent)
+            }
+            if !self.denoPath.isEmpty {
+                pathComponents.append((self.denoPath as NSString).deletingLastPathComponent)
+            }
+            if !pathComponents.isEmpty {
+                let prefix = pathComponents.joined(separator: ":")
+                if let existing = env["PATH"] {
+                    env["PATH"] = "\(prefix):\(existing)"
+                } else {
+                    env["PATH"] = prefix
+                }
+            }
+            p.environment = env
+            let out = Pipe()
+            p.standardOutput = out
+            do {
+                try p.run()
+                p.waitUntilExit()
+                let d = out.fileHandleForReading.readDataToEndOfFile()
+                if let s = String(data: d, encoding: .utf8), let jsonData = s.data(using: .utf8) {
+                    if let obj = try? JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any], let format = obj["format"] as? [String: Any] {
+                        if let tags = format["tags"] as? [String: Any] {
+                            for (k,v) in tags {
+                                if let vs = v as? String { meta[k.lowercased()] = vs }
+                            }
+                        }
+                        if let durationStr = format["duration"] as? String {
+                            if let dur = Double(durationStr) {
+                                meta["duration"] = formatDuration(seconds: dur)
+                            } else {
+                                meta["duration"] = durationStr
+                            }
+                        }
+                    }
+                }
+            } catch {
+                // ignore ffprobe errors
+            }
+        } else {
+            // Fallback to AVFoundation
+            let url = URL(fileURLWithPath: finalPath)
+            let asset = AVURLAsset(url: url)
+            for itemmd in asset.commonMetadata {
+                if let key = itemmd.commonKey?.rawValue, let value = itemmd.stringValue {
+                    meta[key.lowercased()] = value
+                }
+            }
+            let dur = CMTimeGetSeconds(asset.duration)
+            if dur.isFinite && dur > 0 {
+                meta["duration"] = formatDuration(seconds: dur)
+            }
+        }
+
+        if !meta.isEmpty {
+            DispatchQueue.main.async {
+                for (k,v) in meta {
+                    item.metadata[k] = v
+                }
+                if let t = meta["title"] { item.title = t }
+                item.outputFile = finalPath
+            }
+        } else {
+            DispatchQueue.main.async {
+                item.outputFile = finalPath
+            }
+        }
+    }
     @Published var statusMessage: String = "Idle"
     @Published var lastOutput: String = ""
     @Published var isBrewAvailable: Bool = false
@@ -32,11 +171,18 @@ class DownloadManager: NSObject, ObservableObject {
     @Published var audioFormat: String = "mp3" {
         didSet {
             UserDefaults.standard.set(self.audioFormat, forKey: "audioFormat")
+            // If user selects FLAC, ensure quality is set to 'best' (0)
+            if self.audioFormat == "flac" {
+                DispatchQueue.main.async {
+                    self.audioQuality = "0"
+                }
+            }
         }
     }
-    // Only provide the formats requested by the user. Limit to mp3
-    // because bitrate options only work reliably for mp3 conversions.
-    let availableAudioFormats: [String] = ["mp3"]
+    // Provide supported output formats. FLAC added as a lossless option.
+    // Note: bitrate/quality options only apply to MP3; when FLAC is selected
+    // the app will not pass --audio-quality to yt-dlp.
+    let availableAudioFormats: [String] = ["mp3", "flac"]
     // Audio quality options for yt-dlp (value is passed to --audio-quality)
     @Published var audioQuality: String = "0" {
         didSet {
@@ -1173,6 +1319,11 @@ extension DownloadManager: UNUserNotificationCenterDelegate {
     }
     
     private func performDownload(item: DownloadItem) {
+        // Previously a pre-download JSON probe was attempted here. That probe
+        // could block or hang for some URLs. Instead, metadata will be read
+        // from the final saved file after the download completes (see
+        // `extractMetadataForItem`).
+
         let task = Process()
         task.executableURL = URL(fileURLWithPath: self.ytDlpPath)
         
@@ -1180,18 +1331,18 @@ extension DownloadManager: UNUserNotificationCenterDelegate {
         let outputPath = self.saveLocation
         
         // Arguments for yt-dlp to extract highest quality audio in user-selected format
-        task.arguments = [
-            "-f", "bestaudio",  // Download best available audio quality
-            "-x",  // Extract audio
-            "--audio-format", self.audioFormat,  // Convert to selected format (mp3, m4a, etc.)
-            "--audio-quality", self.audioQuality,  // User-selected audio quality (0 = best, or e.g. 320k)
-            "--embed-thumbnail",  // Embed thumbnail as album art
-            "--add-metadata",  // Add metadata to file
-            "-o", "\(outputPath)/%(title)s.%(ext)s",  // Output template
-            "--newline",  // Progress on new lines
-            "--no-playlist",  // Don't download playlists
-            item.url
-        ]
+        var args: [String] = []
+        args += ["-f", "bestaudio"]
+        args += ["-x"]
+        args += ["--audio-format", self.audioFormat]
+        // Only pass --audio-quality for mp3 (bitrate options don't apply to FLAC)
+        if self.audioFormat == "mp3" {
+            args += ["--audio-quality", self.audioQuality]
+        }
+        args += ["--embed-thumbnail", "--add-metadata"]
+        args += ["-o", "\(outputPath)/%(title)s.%(ext)s"]
+        args += ["--newline", "--no-playlist", item.url]
+        task.arguments = args
         
         // Ensure yt-dlp can find Deno by adding deno's directory to PATH when available
         var env = ProcessInfo.processInfo.environment
@@ -1254,6 +1405,10 @@ extension DownloadManager: UNUserNotificationCenterDelegate {
                     // Play a short completion sound
                     NSSound.beep()
                 }
+                // After successful download, extract definitive metadata from the saved file.
+                DispatchQueue.global(qos: .utility).async {
+                    self.extractMetadataForItem(item)
+                }
             } else {
                 let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
                 let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
@@ -1291,12 +1446,36 @@ extension DownloadManager: UNUserNotificationCenterDelegate {
                     self.lastOutput = new
                 }
             }
-            // Parse title from output
+            // Parse title from output and capture destination path when provided
                 if line.contains("[download] Destination:") {
-                let components = line.components(separatedBy: "/")
-                if let filename = components.last?.replacingOccurrences(of: ".mp3", with: "") {
+                if let range = line.range(of: "Destination:") {
+                    let pathStr = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
+                    let full = String(pathStr)
                     DispatchQueue.main.async {
-                        item.title = filename
+                        item.outputFile = full
+                        let fn = URL(fileURLWithPath: full).deletingPathExtension().lastPathComponent
+                        if !fn.isEmpty {
+                            item.title = fn
+                        }
+                    }
+                }
+            }
+
+            // Parse simple metadata lines yt-dlp may print while fetching info or during postprocessing.
+            // Examples: "title: Foo", "artist: Bar", "uploader: Baz", "duration: 3:21"
+            // We'll look for `key: value` patterns for common ID3-like keys.
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let colonRange = trimmed.range(of: ":") {
+                let keyPart = String(trimmed[..<colonRange.lowerBound]).trimmingCharacters(in: .whitespaces).lowercased()
+                let valuePart = String(trimmed[colonRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                let knownKeys = ["title", "artist", "album", "uploader", "duration", "track", "genre", "bitrate", "format"]
+                if knownKeys.contains(keyPart) && !valuePart.isEmpty {
+                    DispatchQueue.main.async {
+                        item.metadata[keyPart] = valuePart
+                        // Keep title in sync if present
+                        if keyPart == "title" {
+                            item.title = valuePart
+                        }
                     }
                 }
             }
@@ -1327,6 +1506,19 @@ extension DownloadManager: UNUserNotificationCenterDelegate {
                     self.statusMessage = "Processing: \(item.title)"
                 }
             }
+        }
+    }
+
+    private func formatDuration(seconds: Double) -> String {
+        guard seconds.isFinite && seconds > 0 else { return "" }
+        let total = Int(round(seconds))
+        let hrs = total / 3600
+        let mins = (total % 3600) / 60
+        let secs = total % 60
+        if hrs > 0 {
+            return String(format: "%d:%02d:%02d", hrs, mins, secs)
+        } else {
+            return String(format: "%d:%02d", mins, secs)
         }
     }
 }

@@ -414,6 +414,25 @@ struct DownloadRowView: View {
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
+
+                    // Live metadata (ID3-like) display
+                    VStack(alignment: .leading, spacing: 2) {
+                        if let artist = item.metadata["artist"] {
+                            Text("Artist: \(artist)")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        if let album = item.metadata["album"] {
+                            Text("Album: \(album)")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        if let duration = item.metadata["duration"] {
+                            Text("Duration: \(duration)")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
                 
                 Spacer()
@@ -550,27 +569,41 @@ struct SettingsView: View {
                     HStack {
                         Text("Audio Quality:")
                         Spacer()
-                        Picker("Quality", selection: $downloadManager.audioQuality) {
-                            ForEach(downloadManager.availableAudioQualityOptions.indices, id: \.self) { idx in
-                                let opt = downloadManager.availableAudioQualityOptions[idx]
-                                Text(opt.label).tag(opt.value)
+                        if downloadManager.audioFormat == "flac" {
+                            // Show a static label for FLAC to avoid confusion
+                            Text("Best (0)")
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .frame(width: 160, alignment: .trailing)
+                                .help("FLAC uses the best available quality")
+                        } else {
+                            Picker("Quality", selection: $downloadManager.audioQuality) {
+                                ForEach(downloadManager.availableAudioQualityOptions.indices, id: \.self) { idx in
+                                    let opt = downloadManager.availableAudioQualityOptions[idx]
+                                    Text(opt.label).tag(opt.value)
+                                }
                             }
+                            .pickerStyle(.menu)
+                            .frame(width: 160)
+                            .help("0 = best (variable), or use e.g. 320k for a target bitrate")
                         }
-                        .pickerStyle(.menu)
-                        .frame(width: 160)
-                        .help("0 = best (variable), or use e.g. 320k for a target bitrate")
                     }
                     
                     HStack {
                         Text("Format:")
                         Spacer()
-                        // Static label since only MP3 is supported
-                        Text("MP3")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .frame(width: 140, alignment: .trailing)
-                            .help("Format is fixed to MP3 (bitrate options only apply to MP3)")
+                        // Picker for available audio formats (MP3, FLAC)
+                        Picker("Format", selection: $downloadManager.audioFormat) {
+                            ForEach(downloadManager.availableAudioFormats, id: \.self) { fmt in
+                                Text(fmt.uppercased()).tag(fmt)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 140)
+                        .help("Select output format. Quality options disabled for FLAC")
                     }
+
+                    
                 }
                 
                 Section("Deno Runtime") {

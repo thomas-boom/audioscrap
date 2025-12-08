@@ -43,12 +43,28 @@ open audioscrap.xcodeproj
 - Paste a YouTube or SoundCloud URL into the URL field and press `Download`.
 - Choose a save location via the `Change...` button.
 - The app converts audio to MP3 and attempts to embed thumbnail and metadata.
-- Audio quality: a picker is available (e.g. `0` = best variable, or specific bitrates like `320k`). Note: bitrate options apply to MP3 only.
+- The app converts audio to MP3 by default and attempts to embed thumbnail and metadata. FLAC (lossless) export is also available from the `Settings`.
+- Audio quality: a picker is available (e.g. `0` = best variable, or specific bitrates like `320k`). Note: bitrate/quality options apply to MP3 only; when `FLAC` is selected the app disables the bitrate picker and uses a lossless export (default `best`).
 - The app shows runtime readiness indicators (yt-dlp, deno, ffmpeg) in the bottom status bar. If any are missing, open `Settings` (gear) to recheck or run remediation actions.
 
 **Persistence & Settings**
 - `audioFormat` and `audioQuality` are persisted to `UserDefaults`.
 - `saveLocation` is now persisted to `UserDefaults` (the app will only adopt a saved location if the folder exists).
+
+**FLAC Export**
+- FLAC is offered as a lossless export option in `Settings` alongside `MP3`.
+- When FLAC is selected:
+  - The audio is exported losslessly; bitrate/quality pickers are disabled because they do not apply to FLAC.
+  - The app defaults to the best/lossless setting (`0`) for compatibility and fidelity.
+  - `ffmpeg` support is recommended to ensure proper container tagging and post-processing; install via Homebrew if you need authoritative tag handling:
+
+```bash
+brew install ffmpeg
+```
+
+Notes:
+- FLAC files are larger than MP3 but preserve full audio fidelity.
+- The app reads final tags from the saved FLAC file after download completes (prefers `ffprobe` when available, falls back to AVFoundation metadata reading).
 
 **Permissions & Notes**
 - Notifications: the app requests permission to post notifications (used for missing-tool alerts and status updates).

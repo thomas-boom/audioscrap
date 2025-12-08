@@ -134,17 +134,51 @@ class DownloadManager: NSObject, ObservableObject {
                 // ignore ffprobe errors
             }
         } else {
-            // Fallback to AVFoundation
+            // Fallback to AVFoundation using the newer async `load` API to avoid
+            // the deprecated synchronous `commonMetadata` access.
             let url = URL(fileURLWithPath: finalPath)
             let asset = AVURLAsset(url: url)
-            for itemmd in asset.commonMetadata {
-                if let key = itemmd.commonKey?.rawValue, let value = itemmd.stringValue {
-                    meta[key.lowercased()] = value
+
+            Task {
+                var localMeta: [String: String] = [:]
+                do {
+                    let items: [AVMetadataItem] = try await asset.load(.commonMetadata)
+                    for itemmd in items {
+                        if let key = itemmd.commonKey?.rawValue {
+                            // `stringValue` is deprecated on macOS 13+. Use async `load(.stringValue)`.
+                            if let anyValue = try? await itemmd.load(.stringValue) {
+                                let valueStr: String
+                                if let s = anyValue as? String {
+                                    valueStr = s
+                                } else {
+                                    valueStr = String(describing: anyValue)
+                                }
+                                localMeta[key.lowercased()] = valueStr
+                            }
+                        }
+                    }
+                    let dur = try await asset.load(.duration)
+                    let durSec = CMTimeGetSeconds(dur)
+                    if durSec.isFinite && durSec > 0 {
+                        localMeta["duration"] = formatDuration(seconds: durSec)
+                    }
+                } catch {
+                    // If loading fails, fall back to leaving metadata empty.
                 }
-            }
-            let dur = CMTimeGetSeconds(asset.duration)
-            if dur.isFinite && dur > 0 {
-                meta["duration"] = formatDuration(seconds: dur)
+
+                if !localMeta.isEmpty {
+                    DispatchQueue.main.async {
+                        for (k, v) in localMeta {
+                            item.metadata[k] = v
+                        }
+                        if let t = localMeta["title"] { item.title = t }
+                        item.outputFile = finalPath
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        item.outputFile = finalPath
+                    }
+                }
             }
         }
 

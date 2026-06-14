@@ -12,10 +12,12 @@ import AppKit
 struct ContentView: View {
     @StateObject private var downloadManager = DownloadManager()
     @State private var urlInput: String = ""
-    // platform picker removed; we always autodetect
+    @State private var selectedOutputKind: DownloadOutputKind = .audio
+    @State private var showingInstallWizard: Bool = false
     @State private var showingSettings = false
+    @State private var bottomSettingsTab: BottomSettingsBar.Tab = .settings
+    // platform picker removed; we always autodetect
     @State private var showingFolderPicker = false
-    @State private var showingAbout = false
     @State private var showingInvalidAlert = false
 
     var body: some View {
@@ -35,11 +37,10 @@ struct ContentView: View {
                     }
                 }
                 .padding()
-                .font(.system(.body, design: .monospaced))
+                .font(.custom(FontManager.preferredFontPostScriptName, size: NSFont.systemFontSize))
             }
 
             // Bottom status bar remains visible
-            Divider()
             statusBar
         }
         .frame(minWidth: 700, minHeight: 420)
@@ -47,14 +48,25 @@ struct ContentView: View {
             // Ensure the app is activated and window is brought to front
             DispatchQueue.main.async {
                 NSApplication.shared.activate(ignoringOtherApps: true)
+                if !UserDefaults.standard.bool(forKey: "hasSeenInstallWizard") {
+                    showingInstallWizard = true
+                }
             }
         }
-        .sheet(isPresented: $showingSettings) {
-            SettingsView(downloadManager: downloadManager)
+        
+        .sheet(isPresented: $showingInstallWizard) {
+            InstallWizardView(downloadManager: downloadManager, isPresented: $showingInstallWizard)
         }
-        .sheet(isPresented: $showingAbout) {
-            aboutSheet
-        }
+        .overlay(
+            Group {
+                if showingSettings {
+                    BottomSettingsBar(downloadManager: downloadManager, isPresented: $showingSettings, selectedTab: $bottomSettingsTab)
+                        .transition(.move(edge: .bottom))
+                        .zIndex(1)
+                }
+            },
+            alignment: .bottom
+        )
         .fileImporter(
             isPresented: $showingFolderPicker,
             allowedContentTypes: [.folder],
@@ -72,6 +84,11 @@ struct ContentView: View {
         .alert(isPresented: $showingInvalidAlert) {
             Alert(title: Text("Unsupported URL"), message: Text("Please paste a YouTube or SoundCloud URL only."), dismissButton: .default(Text("OK")))
         }
+        .onChange(of: urlInput) { newValue in
+            if !isYouTubeURL(newValue) {
+                selectedOutputKind = .audio
+            }
+        }
     }
 
     private func isSupportedURL(_ raw: String) -> Bool {
@@ -82,10 +99,15 @@ struct ContentView: View {
         return false
     }
 
+    private func isYouTubeURL(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), let host = url.host?.lowercased() else { return false }
+        return host.contains("youtube.com") || host == "youtu.be"
+    }
+
     // MARK: - Status Bar
     private var statusBar: some View {
         // Compute runtime availability before building the view to avoid ViewBuilder type inference issues
-        // yt-dlp checks
         let ytFound = !downloadManager.ytDlpPath.isEmpty || downloadManager.ytDlpCandidatePath != nil || downloadManager.ytDlpResolvedCandidatePath != nil
         let ytExecutable = (!downloadManager.ytDlpPath.isEmpty && FileManager.default.isExecutableFile(atPath: downloadManager.ytDlpPath)) || (downloadManager.ytDlpResolvedCandidatePath != nil && FileManager.default.isExecutableFile(atPath: downloadManager.ytDlpResolvedCandidatePath!))
         let ytReady = downloadManager.isYtDlpInstalled
@@ -104,7 +126,7 @@ struct ContentView: View {
         func runtimeChecks(name: String, found: Bool, executable: Bool, ready: Bool) -> some View {
             HStack(spacing: 6) {
                 Text(name)
-                    .font(.system(.caption2, design: .monospaced))
+                    .font(.appFont(.caption2))
                     .frame(minWidth: 54, alignment: .leading)
 
                 Image(systemName: executable ? "checkmark.circle.fill" : "circle")
@@ -121,36 +143,58 @@ struct ContentView: View {
             }
         }
 
-        return HStack(spacing: 24) {
-            // Single combined check per runtime: present && executable && reported ready
-            let ytOk = ytFound && ytExecutable && ytReady
-            HStack(spacing: 8) {
-                Text("yt-dlp")
-                    .font(.system(.caption2, design: .monospaced))
-                Image(systemName: ytOk ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(ytOk ? .green : .gray)
+        return HStack(spacing: 12) {
+            // About button at the left opens the bottom About tab
+            Button(action: {
+                withAnimation(.interactiveSpring(response: 0.45, dampingFraction: 0.82, blendDuration: 0)) {
+                    bottomSettingsTab = .about
+                    showingSettings = true
+                }
+            }) {
+                Image(systemName: "info.circle")
+                    .imageScale(.large)
             }
+            .buttonStyle(.plain)
+            .help("About")
 
-            let denoOk = denoFound && denoExecutable && denoReady
-            HStack(spacing: 8) {
-                Text("deno")
-                    .font(.system(.caption2, design: .monospaced))
-                Image(systemName: denoOk ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(denoOk ? .green : .gray)
-            }
+            Spacer()
 
-            let ffOk = ffFound && ffExecutable && ffReady
-            HStack(spacing: 8) {
-                Text("ffmpeg")
-                    .font(.system(.caption2, design: .monospaced))
-                Image(systemName: ffOk ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(ffOk ? .green : .gray)
+            // Center: compact runtime indicators
+            HStack(spacing: 18) {
+                let ytOk = ytFound && ytExecutable && ytReady
+                HStack(spacing: 8) {
+                    Text("yt-dlp")
+                        .font(.appFont(.caption2))
+                    Image(systemName: ytOk ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(ytOk ? .green : .gray)
+                }
+
+                let denoOk = denoFound && denoExecutable && denoReady
+                HStack(spacing: 8) {
+                    Text("deno")
+                        .font(.appFont(.caption2))
+                    Image(systemName: denoOk ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(denoOk ? .green : .gray)
+                }
+
+                let ffOk = ffFound && ffExecutable && ffReady
+                HStack(spacing: 8) {
+                    Text("ffmpeg")
+                        .font(.appFont(.caption2))
+                    Image(systemName: ffOk ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(ffOk ? .green : .gray)
+                }
             }
 
             Spacer()
 
-            // Settings button kept small
-            Button(action: { showingSettings = true }) {
+            // Settings button on the right
+            Button(action: {
+                withAnimation(.interactiveSpring(response: 0.45, dampingFraction: 0.82, blendDuration: 0)) {
+                    bottomSettingsTab = .settings
+                    showingSettings = true
+                }
+            }) {
                 Image(systemName: "gearshape")
             }
             .buttonStyle(.plain)
@@ -168,107 +212,31 @@ struct ContentView: View {
     private var headerView: some View {
         VStack(spacing: 8) {
             HStack(spacing: 12) {
-                    Image(systemName: "music.note.list")
-                        .font(.system(size: 32))
-                        .foregroundColor(.accentColor)
+                Image("Logo")
+                    .renderingMode(.original)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 32, height: 32)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("audioscrap")
-                            .font(.system(.title3, design: .monospaced))
-                            .fontWeight(.bold)
-                    }
-                Spacer()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Audioscrap")
+                        .font(.appFont(.title3))
+                        .fontWeight(.bold)
 
-                // About / Info button on the right side of the title
-                Button(action: { showingAbout = true }) {
-                    Image(systemName: "info.circle")
+                    Text("Audio and Video downloader for YouTube, SoundCloud, and more")
+                        .font(.appFont(.caption))
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(.plain)
-                .help("About this app")
+
+                Spacer()
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
         }
     }
 
-    // About sheet content (moved from Settings -> About)
-    private var aboutSheet: some View {
-        VStack(spacing: 16) {
-            HStack {
-                VStack(alignment: .leading) {
-                    let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "audioscrap"
-                    let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-                    let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-                    Text(appName)
-                        .font(.system(.title, design: .monospaced))
-                        .fontWeight(.bold)
-                    Text("Version \(shortVersion) (\(build))")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            }
-
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("AudioScrap is front-end that uses yt-dlp to download the highest quality audio available from YouTube and SoundCloud, converting it to MP3 format with metadata and album art.")
-                        .font(.system(.footnote, design: .monospaced))
-                        .foregroundColor(.secondary)
-
-                    // Additional app details (smaller text)
-                    Group {
-                        HStack {
-                            Text("Author:")
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            Text("Thomas Boom")
-                                .font(.system(.caption2, design: .monospaced))
-                        }
-
-                        HStack {
-                            Text("Repository:")
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            Button("View on GitHub") {
-                                if let url = URL(string: "https://github.com/thomas-boom/audioscrap") {
-                                    NSWorkspace.shared.open(url)
-                                }
-                            }
-                            .buttonStyle(.link)
-                        }
-
-                        HStack {
-                            Text("Support:")
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            Button("Report an issue") {
-                                if let url = URL(string: "https://github.com/thomas-boom/audioscrap/issues") {
-                                    NSWorkspace.shared.open(url)
-                                }
-                            }
-                            .buttonStyle(.link)
-                        }
-                    }
-                    .padding(.top, 6)
-
-                }
-                .padding(.bottom)
-            }
-
-            HStack {
-                Spacer()
-                Button("Done") { showingAbout = false }
-                    .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding()
-        .frame(minWidth: 420, minHeight: 260)
-    }
+    // Bottom tab bar removed — dependency indicators moved into Settings window.
     
     // MARK: - Input Section
     private var inputSection: some View {
@@ -279,11 +247,11 @@ struct ContentView: View {
                     .foregroundColor(.accentColor)
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Save to:")
-                        .font(.system(.caption, design: .monospaced))
+                        Text("Save to:")
+                            .font(.appFont(.caption))
                         .foregroundColor(.secondary)
                     Text(downloadManager.saveLocation)
-                        .font(.system(.caption, design: .monospaced))
+                        .font(.appFont(.caption))
                         .lineLimit(1)
                         .foregroundColor(.primary)
                 }
@@ -300,36 +268,55 @@ struct ContentView: View {
             // Platform selection removed — autodetect only
             
             // URL Input
-            HStack(spacing: 12) {
-                Image(systemName: "link.circle.fill")
-                    .font(.system(.title2, design: .monospaced))
-                    .foregroundColor(.accentColor)
-                
-                TextField("Paste YouTube or SoundCloud URL here...", text: $urlInput)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    Image(systemName: "link.circle.fill")
+                        .font(.appFont(.title2))
+                        .foregroundColor(.accentColor)
+                    
+                    TextField("Paste videolink (YouTube, Vimeo, etc.) or audiolink (SoundCloud, etc.) here...", text: $urlInput)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit {
+                            addDownload()
+                        }
+                    Button(action: { urlInput = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear URL")
+                    .disabled(urlInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                    
+                    Button(action: {
+                        let trimmed = urlInput.trimmingCharacters(in: .whitespaces)
+                        guard isSupportedURL(trimmed) else {
+                            showingInvalidAlert = true
+                            return
+                        }
                         addDownload()
+                    }) {
+                            Label("Download", systemImage: "arrow.down.circle.fill")
+                            .font(.appFont(.headline))
                     }
-                Button(action: { urlInput = "" }) {
-                    Image(systemName: "xmark.circle.fill")
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!isSupportedURL(urlInput) || !downloadManager.isYtDlpInstalled)
                 }
-                .buttonStyle(.plain)
-                .help("Clear URL")
-                .disabled(urlInput.trimmingCharacters(in: .whitespaces).isEmpty)
-                
-                Button(action: {
-                    let trimmed = urlInput.trimmingCharacters(in: .whitespaces)
-                    guard isSupportedURL(trimmed) else {
-                        showingInvalidAlert = true
-                        return
+
+                if isYouTubeURL(urlInput) {
+                    HStack(spacing: 12) {
+                        Text("Output:")
+                            .foregroundColor(.secondary)
+                        Picker("", selection: $selectedOutputKind) {
+                            Text("Audio").tag(DownloadOutputKind.audio)
+                            Text(".mov video").tag(DownloadOutputKind.mov)
+                            Text(".mp4 video").tag(DownloadOutputKind.mp4)
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
+                        .help("Video requires a YouTube link and ffmpeg")
+
+                        Spacer()
                     }
-                    addDownload()
-                }) {
-                    Label("Download", systemImage: "arrow.down.circle.fill")
-                        .font(.system(.headline, design: .monospaced))
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!isSupportedURL(urlInput) || !downloadManager.isYtDlpInstalled)
             }
                 .padding(.horizontal)
             .padding(.bottom, 12)
@@ -344,15 +331,15 @@ struct ContentView: View {
             Spacer()
 
             Image(systemName: "arrow.down.circle")
-                .font(.system(size: 64))
+                .font(.appFont(size: 64))
                 .foregroundColor(.secondary)
 
             Text("No downloads yet")
-                .font(.system(.title2, design: .monospaced))
+                .font(.appFont(.title2))
                 .fontWeight(.semibold)
 
             Text("Paste a YouTube or SoundCloud URL above and click Download to start")
-                .font(.system(.body, design: .monospaced))
+                .font(.appFont(.body))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
@@ -387,10 +374,15 @@ struct ContentView: View {
     private func addDownload() {
         let trimmedURL = urlInput.trimmingCharacters(in: .whitespaces)
         guard !trimmedURL.isEmpty else { return }
-        
-        downloadManager.addDownload(url: trimmedURL)
+
+        let outputKind = isYouTubeURL(trimmedURL) ? selectedOutputKind : .audio
+        downloadManager.addDownload(url: trimmedURL, outputKind: outputKind)
         urlInput = ""
+        selectedOutputKind = .audio
     }
+
+    
+
 }
 
 // MARK: - Download Row View
@@ -407,11 +399,11 @@ struct DownloadRowView: View {
                 // Title and URL
                 VStack(alignment: .leading, spacing: 4) {
                     Text(item.title)
-                        .font(.system(.headline, design: .monospaced))
+                        .font(.appFont(.headline))
                         .lineLimit(1)
                     
                     Text(item.url)
-                        .font(.system(.caption, design: .monospaced))
+                        .font(.appFont(.caption))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
 
@@ -419,17 +411,17 @@ struct DownloadRowView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         if let artist = item.metadata["artist"] {
                             Text("Artist: \(artist)")
-                                .font(.system(.caption2, design: .monospaced))
+                                .font(.appFont(.caption2))
                                 .foregroundColor(.secondary)
                         }
                         if let album = item.metadata["album"] {
                             Text("Album: \(album)")
-                                .font(.system(.caption2, design: .monospaced))
+                                .font(.appFont(.caption2))
                                 .foregroundColor(.secondary)
                         }
                         if let duration = item.metadata["duration"] {
                             Text("Duration: \(duration)")
-                                .font(.system(.caption2, design: .monospaced))
+                                .font(.appFont(.caption2))
                                 .foregroundColor(.secondary)
                         }
                     }
@@ -450,13 +442,13 @@ struct DownloadRowView: View {
                     
                     HStack {
                         Text(item.status.rawValue)
-                            .font(.system(.caption2, design: .monospaced))
+                            .font(.appFont(.caption2))
                             .foregroundColor(.secondary)
                         
                         Spacer()
                         
                         Text("\(Int(item.progress * 100))%")
-                            .font(.system(.caption2, design: .monospaced))
+                            .font(.appFont(.caption2))
                             .foregroundColor(.secondary)
                     }
                 }
@@ -465,7 +457,7 @@ struct DownloadRowView: View {
             // Error message
             if let error = item.error, item.status == .failed {
                 Text(error)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(.appFont(.caption))
                     .foregroundColor(.red)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
@@ -478,18 +470,18 @@ struct DownloadRowView: View {
                         .foregroundColor(.green)
                     
                     Text("Saved to Downloads")
-                        .font(.system(.caption, design: .monospaced))
+                        .font(.appFont(.caption))
                         .foregroundColor(.secondary)
                     
                     Button("Show in Finder") {
                         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: outputPath)
                     }
                     .buttonStyle(.link)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(.appFont(.caption))
                 }
             }
         }
-        .font(.system(.body, design: .monospaced))
+        .font(.appFont(.body))
         .padding()
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(10)
@@ -519,7 +511,7 @@ struct DownloadRowView: View {
                     .foregroundColor(.red)
             }
         }
-        .font(.system(.title3, design: .monospaced))
+        .font(.appFont(.title3))
         .frame(width: 30)
         .scaleEffect(item.status == .downloading ? 1.07 : 1.0)
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: item.status)
@@ -553,12 +545,16 @@ struct DownloadRowView: View {
 // MARK: - Settings View
 struct SettingsView: View {
     @ObservedObject var downloadManager: DownloadManager
+    // Optional binding used when SettingsView is embedded in the bottom overlay.
+    // If nil, fall back to `dismiss()` for modal presentations.
+    var isPresented: Binding<Bool>? = nil
+    var onRequestDismiss: (() -> Void)? = nil
     @Environment(\.dismiss) var dismiss
     
     var body: some View {
         VStack(spacing: 20) {
             Text("Settings")
-                .font(.system(.title, design: .monospaced))
+                .font(.appFont(.title))
                 .fontWeight(.bold)
             
             // Make the default font inside settings monospaced
@@ -572,7 +568,7 @@ struct SettingsView: View {
                         if downloadManager.audioFormat == "flac" {
                             // Show a static label for FLAC to avoid confusion
                             Text("Best (0)")
-                                .font(.system(.caption, design: .monospaced))
+                                .font(.appFont(.caption))
                                 .foregroundColor(.secondary)
                                 .frame(width: 160, alignment: .trailing)
                                 .help("FLAC uses the best available quality")
@@ -603,6 +599,20 @@ struct SettingsView: View {
                         .help("Select output format. Quality options disabled for FLAC")
                     }
 
+                    HStack {
+                        Text("Video Quality:")
+                        Spacer()
+                        Picker("Video Quality", selection: $downloadManager.videoQuality) {
+                            ForEach(downloadManager.availableVideoQualityOptions.indices, id: \.self) { idx in
+                                let opt = downloadManager.availableVideoQualityOptions[idx]
+                                Text(opt.label).tag(opt.value)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 220)
+                        .help("Used when MP4 video is selected")
+                    }
+
                     
                 }
                 
@@ -624,7 +634,7 @@ struct SettingsView: View {
                             Text("Path:")
                             Spacer()
                             Text(downloadManager.denoPath)
-                                .font(.system(.caption, design: .monospaced))
+                                .font(.appFont(.caption))
                                 .foregroundColor(.secondary)
                         }
                     }
@@ -674,7 +684,7 @@ struct SettingsView: View {
                             Text("Path:")
                             Spacer()
                             Text(downloadManager.ytDlpPath)
-                                .font(.system(.caption, design: .monospaced))
+                                .font(.appFont(.caption))
                                 .foregroundColor(.secondary)
                         }
                     }
@@ -725,7 +735,7 @@ struct SettingsView: View {
                             Text("Path:")
                             Spacer()
                             Text(downloadManager.ffmpegPath)
-                                .font(.system(.caption, design: .monospaced))
+                                .font(.appFont(.caption))
                                 .foregroundColor(.secondary)
                         }
                     }
@@ -761,7 +771,13 @@ struct SettingsView: View {
             .formStyle(.grouped)
             
             Button("Done") {
-                dismiss()
+                if let onRequestDismiss = onRequestDismiss {
+                    onRequestDismiss()
+                } else if let isPresented = isPresented {
+                    isPresented.wrappedValue = false
+                } else {
+                    dismiss()
+                }
             }
             .buttonStyle(.borderedProminent)
         }

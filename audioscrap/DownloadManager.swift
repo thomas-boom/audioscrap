@@ -36,9 +36,12 @@ class DownloadManager: NSObject, ObservableObject {
             let dir = self.saveLocation
             do {
                 let contents = try fm.contentsOfDirectory(atPath: dir)
+                let expectedExtensions: [String] = item.outputKind.isVideo
+                    ? ["mov", "mp4"]
+                    : [self.audioFormat, "mp3", "flac"]
                 let candidates = contents.filter { name in
                     let lower = name.lowercased()
-                    return lower.hasSuffix(".\(self.audioFormat)") || lower.hasSuffix(".mp3") || lower.hasSuffix(".flac")
+                    return expectedExtensions.contains { lower.hasSuffix(".\($0)") }
                 }
                 if !candidates.isEmpty {
                     if !item.title.isEmpty && item.title != "Fetching info..." {
@@ -224,11 +227,22 @@ class DownloadManager: NSObject, ObservableObject {
         }
     }
     let availableAudioQualityOptions: [(label: String, value: String)] = [
-        ("Best (0)", "0"),
         ("320k", "320k"),
         ("256k", "256k"),
         ("192k", "192k"),
         ("128k", "128k")
+    ]
+    // Video quality selector used when MP4 output is chosen.
+    @Published var videoQuality: String = "bestvideo[height<=1080]+bestaudio/best" {
+        didSet {
+            UserDefaults.standard.set(self.videoQuality, forKey: "videoQuality")
+        }
+    }
+    let availableVideoQualityOptions: [(label: String, value: String)] = [
+        ("720p", "bestvideo[height<=720]+bestaudio/best"),
+        ("1080p", "bestvideo[height<=1080]+bestaudio/best"),
+        ("1440p", "bestvideo[height<=1440]+bestaudio/best"),
+        ("4K", "bestvideo[height<=2160]+bestaudio/best")
     ]
     // Deno runtime detection (yt-dlp now requires Deno for some features)
     @Published var isDenoInstalled: Bool = false
@@ -281,6 +295,17 @@ class DownloadManager: NSObject, ObservableObject {
             }
             if let savedQuality = UserDefaults.standard.string(forKey: "audioQuality") {
                 self.audioQuality = savedQuality
+            }
+            if let savedVideoQuality = UserDefaults.standard.string(forKey: "videoQuality"), !savedVideoQuality.isEmpty {
+                // Validate the saved value against known options; fall back to 1080p if invalid
+                let validValues = self.availableVideoQualityOptions.map { $0.value }
+                if validValues.contains(savedVideoQuality) {
+                    self.videoQuality = savedVideoQuality
+                } else {
+                    let default1080 = self.availableVideoQualityOptions.first(where: { $0.label == "1080p" })?.value ?? "bestvideo[height<=1080]+bestaudio/best"
+                    self.videoQuality = default1080
+                    UserDefaults.standard.set(self.videoQuality, forKey: "videoQuality")
+                }
             }
             if let savedLocation = UserDefaults.standard.string(forKey: "saveLocation"), !savedLocation.isEmpty {
                 // Only adopt the saved location if the path actually exists; otherwise keep default
@@ -525,6 +550,41 @@ class DownloadManager: NSObject, ObservableObject {
         }
 
         return (exec, "")
+    }
+
+    /// List supported extractors/sites from the installed `yt-dlp` binary.
+    /// If `yt-dlp` is not found in `ytDlpPath`, this will try to run `yt-dlp` via `/usr/bin/env`.
+    func listSupportedSites(completion: @escaping (Result<[String], Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let execPath = !self.ytDlpPath.isEmpty ? self.ytDlpPath : "/usr/bin/env"
+            let args: [String]
+            if execPath == "/usr/bin/env" {
+                args = ["yt-dlp", "--list-extractors"]
+            } else {
+                args = ["--list-extractors"]
+            }
+
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: execPath)
+            task.arguments = args
+            let out = Pipe()
+            task.standardOutput = out
+            task.standardError = Pipe()
+
+            do {
+                try task.run()
+                task.waitUntilExit()
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                if let s = String(data: data, encoding: .utf8) {
+                    let lines = s.split { $0.isNewline }.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                    completion(.success(lines))
+                } else {
+                    completion(.failure(NSError(domain: "audioscrap", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to decode yt-dlp output"])))
+                }
+            } catch {
+                completion(.failure(error))
+            }
+        }
     }
 
     /// Detect Homebrew path synchronously (can be run off the main thread).
@@ -1196,6 +1256,75 @@ class DownloadManager: NSObject, ObservableObject {
         }
     }
 
+    /// Install all missing dependencies (yt-dlp, deno, ffmpeg) via Homebrew sequentially.
+    /// Calls the optional completion on finish.
+    func installAllDependencies(completion: (() -> Void)? = nil) {
+        guard isBrewAvailable else {
+            DispatchQueue.main.async {
+                self.statusMessage = "Homebrew not available — install Homebrew first"
+                self.postSimpleNotification(title: "Homebrew missing", body: "Install Homebrew: /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
+            }
+            completion?()
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            DispatchQueue.main.async { self.statusMessage = "Installing dependencies..." }
+            let brewCmd = self.brewPath.isEmpty ? "brew" : self.brewPath
+            let packages = ["yt-dlp", "deno", "ffmpeg"]
+
+            for pkg in packages {
+                var alreadyInstalled = false
+                switch pkg {
+                case "yt-dlp": alreadyInstalled = self.isYtDlpInstalled
+                case "deno": alreadyInstalled = self.isDenoInstalled
+                case "ffmpeg": alreadyInstalled = self.isFfmpegInstalled
+                default: break
+                }
+                if alreadyInstalled { continue }
+
+                let task = Process()
+                task.launchPath = "/bin/bash"
+                task.arguments = ["-lc", "\(brewCmd) install \(pkg)"]
+                let pipe = Pipe()
+                task.standardOutput = pipe
+                task.standardError = pipe
+                do {
+                    try task.run()
+                    task.waitUntilExit()
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    let output = String(data: data, encoding: .utf8) ?? ""
+                    DispatchQueue.main.async {
+                        if task.terminationStatus == 0 {
+                            self.statusMessage = "\(pkg) installed"
+                        } else {
+                            self.statusMessage = "Install failed: \(pkg)"
+                            self.lastOutput = output
+                        }
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self.statusMessage = "Install error: \(error.localizedDescription)"
+                        self.lastOutput = error.localizedDescription
+                    }
+                }
+
+                // Re-run checks for the package we just attempted
+                switch pkg {
+                case "yt-dlp": self.checkYtDlpInstallation(brewPrefix: self.brewPrefix)
+                case "deno": self.checkDenoInstallation(brewPrefix: self.brewPrefix)
+                case "ffmpeg": self.checkFfmpegInstallation(brewPrefix: self.brewPrefix)
+                default: break
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.statusMessage = "Dependency install finished"
+                completion?()
+            }
+        }
+    }
+
     // MARK: - Notifications
     private func requestNotificationPermission() {
         let center = UNUserNotificationCenter.current()
@@ -1316,8 +1445,8 @@ extension DownloadManager: UNUserNotificationCenterDelegate {
         completionHandler()
     }
     
-    func addDownload(url: String, platform: Platform = .auto) {
-        let item = DownloadItem(url: url, platform: platform)
+    func addDownload(url: String, platform: Platform = .auto, outputKind: DownloadOutputKind = .audio) {
+        let item = DownloadItem(url: url, platform: platform, outputKind: outputKind)
         // Append on main thread with animation so UI can transition the new row
         DispatchQueue.main.async {
             withAnimation(.spring(response: 0.36, dampingFraction: 0.8)) {
@@ -1364,16 +1493,28 @@ extension DownloadManager: UNUserNotificationCenterDelegate {
         // Use user-selected save location
         let outputPath = self.saveLocation
         
-        // Arguments for yt-dlp to extract highest quality audio in user-selected format
+        // Arguments for yt-dlp depend on whether the user requested audio or MP4 video
         var args: [String] = []
-        args += ["-f", "bestaudio"]
-        args += ["-x"]
-        args += ["--audio-format", self.audioFormat]
-        // Only pass --audio-quality for mp3 (bitrate options don't apply to FLAC)
-        if self.audioFormat == "mp3" {
-            args += ["--audio-quality", self.audioQuality]
+        if item.outputKind.isVideo {
+            args += ["-f", self.videoQuality]
+            if item.outputKind == .mov {
+                args += ["--merge-output-format", "mov"]
+            } else if item.outputKind == .mp4 {
+                args += ["--merge-output-format", "mp4"]
+            }
+        } else {
+            args += ["-f", "bestaudio"]
+            args += ["-x"]
+            args += ["--audio-format", self.audioFormat]
+            // Only pass --audio-quality for mp3 (bitrate options don't apply to FLAC)
+            if self.audioFormat == "mp3" {
+                args += ["--audio-quality", self.audioQuality]
+            }
         }
-        args += ["--embed-thumbnail", "--add-metadata"]
+        if !item.outputKind.isVideo {
+            args += ["--embed-thumbnail"]
+        }
+        args += ["--add-metadata"]
         args += ["-o", "\(outputPath)/%(title)s.%(ext)s"]
         args += ["--newline", "--no-playlist", item.url]
         task.arguments = args

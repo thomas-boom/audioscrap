@@ -30,6 +30,16 @@ enum Platform: String, CaseIterable {
     }
 }
 
+enum DownloadOutputKind: String, CaseIterable, Hashable {
+    case audio = "Audio"
+    case mov = ".mov video"
+    case mp4 = ".mp4 video"
+
+    var isVideo: Bool {
+        self == .mov || self == .mp4
+    }
+}
+
 class DownloadItem: Identifiable, ObservableObject {
     let id = UUID()
     @Published var url: String
@@ -37,16 +47,18 @@ class DownloadItem: Identifiable, ObservableObject {
     @Published var status: DownloadStatus
     @Published var progress: Double
     @Published var platform: Platform
+    @Published var outputKind: DownloadOutputKind
     @Published var error: String?
     @Published var outputPath: String?
     @Published var outputFile: String?
     @Published var metadata: [String: String] = [:]
     
-    init(url: String, platform: Platform = .auto) {
+    init(url: String, platform: Platform = .auto, outputKind: DownloadOutputKind = .audio) {
         self.url = url
         self.title = "Fetching info..."
         self.status = .pending
         self.progress = 0.0
         self.platform = platform
+        self.outputKind = outputKind
     }
 }

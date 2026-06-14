@@ -6,6 +6,8 @@
 
 _Audio and Video downloader for YouTube, SoundCloud, and more_
 
+<img width="1012" height="718" alt="Screenshot 2026-06-14 at 21 51 15" src="https://github.com/user-attachments/assets/dea2990b-a4b2-4a9d-adcb-75c5ef7ca4ac" />
+
 ## Features
 
 - Download audio and video from supported sites

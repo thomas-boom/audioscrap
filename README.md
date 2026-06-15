@@ -78,10 +78,6 @@ Look for an asset named similar to `audioscrap-macos-arm64.zip`.
 
 Contributions, bug reports, and PRs are welcome. Please open issues on the repository.
 
-## License
-
-Add a `LICENSE` file if you wish to specify licensing for this project.
-
 <p align="center">
   <a href="https://www.flaticon.com/free-icons/wire" title="wire icons">Wire icons created by Freepik - Flaticon</a>
 </p>
